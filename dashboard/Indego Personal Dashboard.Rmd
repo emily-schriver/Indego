@@ -1,0 +1,541 @@
+---
+title: "INDEGO BIKESHARE ANALYSIS"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    #theme: spacelab
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse) 
+library(lubridate)
+library(qicharts2)
+library(highcharter)
+library(shiny)
+#library(dplyr)
+library(leaflet)
+library(htmltools)
+library(DT)
+library(knitr)
+library(geosphere)
+library(gmapsdistance)
+```
+
+```{r read_data}
+station<-read.csv('H:/fun data/indego/updated_station_info.csv', header = TRUE)
+weather<-read.csv('H:/fun data/indego/may2016toapr2019weather.csv', header = TRUE)
+emily_bike_raw<-read.csv('H:/fun data/indego/personal test data.csv', header = TRUE)
+
+emily_bike_mid <- emily_bike_raw %>% 
+  mutate(id = rep(1:(nrow(emily_bike_raw)/5), each = 5))
+
+emily_var2 <- emily_bike_mid %>% dplyr::select(id,variable = variable2, value = value2) %>% 
+  filter(variable != "")
+
+emily_data_clean <- emily_bike_mid %>% 
+  dplyr::select(id, variable, value) %>% 
+  bind_rows(emily_var2) %>% 
+  tidyr::spread(key = variable, value = value) %>% 
+  mutate(date = as.Date(date, "%m/%d/%Y"),
+         duration = as.numeric(duration),
+         miles = as.numeric(miles)) %>% 
+  filter(duration > 1) %>% 
+  ## some rides do not get checked back in - looks like indego calculates mileage based on time duration.
+  ## for any rides > 5 miles that don't end at Phila. Museum of Art, we will adjust to my anticipated average of 2.5 miles
+  mutate(miles_clean = case_when(station_end != 'Philadelphia Museum of Art' & miles > 4.5 ~ 2.5,
+                                 station_end == station_start & duration < 5 ~ 0,
+                                 station_end != station_start & miles == 0 ~ 0.30,
+                                 ## standardize work trips
+                                 station_start == '20th & Fairmount' & station_end == 'Health Sciences Drive' ~ 2.6,
+                                 station_start == 'Health Sciences Drive' & station_end == '20th & Fairmount' ~ 2.6,
+                                            TRUE ~ miles)) %>% 
+  filter(miles_clean > 0)
+```
+
+```{r station_data}
+emily_station <- emily_data_clean %>% 
+  left_join(station, by = c('station_start' = 'station_name')) %>% 
+  dplyr::rename(start_lat = lat, start_lon = lon) %>% 
+  left_join(station, by = c('station_end' = 'station_name')) %>% 
+  dplyr::rename(end_lat = lat, end_lon = lon) %>% 
+  dplyr::mutate(start_lat = case_when(station_start == 'Health Sciences Drive' ~ 39.945730,
+                                      station_start == 'Broad & Passyunk' ~ 39.925665,
+                                      station_start == '27th & Girard' ~ 39.974160,
+                                      station_start == '38th & Powelton'~ 39.959550,
+                                      station_start == 'Pennsylvania & Fairmount Perelman Building' ~ 39.968034,
+                                      station_start == '24th & Race SRT' ~ 39.958162,
+                                      TRUE ~ start_lat)) %>% 
+  dplyr::mutate(start_lon = case_when(station_start == 'Health Sciences Drive' ~ -75.195296,
+                                      station_start == 'Broad & Passyunk' ~ -75.169225,
+                                      station_start == '27th & Girard'~ -75.180450,
+                                      station_start == '38th & Powelton'~ -75.197190,
+                                      station_start == 'Pennsylvania & Fairmount Perelman Building'~ -75.180220,
+                                      station_start == '24th & Race SRT' ~ -75.178262,
+                                      TRUE ~ start_lon)) %>% 
+  dplyr::mutate(end_lat = case_when(station_end == 'Health Sciences Drive' ~ 39.945730,
+                                      station_end == 'Broad & Passyunk' ~ 39.925665,
+                                      station_end == '27th & Girard' ~ 39.974160,
+                                      station_end == '38th & Powelton'~ 39.959550,
+                                      station_end == 'Pennsylvania & Fairmount Perelman Building' ~ 39.968034,
+                                      station_end == '24th & Race SRT' ~ 39.958162,
+                                      TRUE ~ end_lat)) %>% 
+  dplyr::mutate(end_lon = case_when(station_end == 'Health Sciences Drive' ~ -75.195296,
+                                      station_end == 'Broad & Passyunk' ~ -75.169225,
+                                      station_end == '27th & Girard'~ -75.180450,
+                                      station_end == '38th & Powelton'~ -75.197190,
+                                      station_end == 'Pennsylvania & Fairmount Perelman Building'~ -75.180220,
+                                      station_end == '24th & Race SRT' ~ -75.178262,
+                                      TRUE ~ end_lon)) #%>% 
+  #dplyr::mutate(start_gps = paste0(start_lat,"+", start_lon),
+  #              end_gps = paste0(end_lat,"+", end_lon))
+
+start_stations<-emily_station %>% 
+  dplyr::select(id, station_start, start_lat, start_lon) %>% 
+  group_by(station_start, start_lat, start_lon) %>% 
+  summarise(n=n()) %>% 
+  ungroup() %>% 
+  #dplyr::mutate(relative_n = case_when(n > 25 ~ min(n*0.5,40),
+  #                                     TRUE ~ min(n*0.5,40))) %>% 
+  rename(station = station_start, lat = start_lat, lon = start_lon)%>% 
+  dplyr::mutate(type = 'start')
+
+end_stations<-emily_station %>% 
+  dplyr::select(id, station_end, end_lat, end_lon) %>% 
+  group_by(station_end, end_lat, end_lon) %>% 
+  summarise(n=n()) %>% 
+  ungroup() %>% 
+  #dplyr::mutate(relative_n = case_when(n > 25 ~ min(n*0.5,40),
+  #                                     TRUE ~ min(n*0.5,40))) %>% 
+  rename(station = station_end, lat = end_lat, lon = end_lon) %>% 
+  dplyr::mutate(type = 'end')
+
+
+all_stations <- start_stations %>% 
+  bind_rows(end_stations) %>% 
+ # dplyr::select(-relative_n) %>% 
+  tidyr::spread(key = type, value = n, fill = 0) %>% 
+  dplyr::group_by(station) %>% 
+  dplyr::mutate(relative_start_n = min(start*0.7,41),
+                relative_end_n = min(end*0.7,41),
+                relative_start_n = ifelse(relative_start_n == relative_end_n & start > end, relative_start_n+5, relative_start_n),
+                relative_end_n = ifelse(relative_start_n == relative_end_n & start < end, relative_end_n+5, relative_end_n),
+                label = paste0(station,'<br>Number Start Rides: ',start, '<br>Number End Rides: ',end)) %>% 
+  dplyr::ungroup()
+```
+
+<style>
+.sidebar{
+  width: 30%;
+}
+
+
+.column-left{
+  float: left;
+  width: 66.6%;
+  height: 97%;
+  text-align: left;
+}
+
+
+.column-right{
+  float: right;
+  width: 32.5%;
+  height: 97%;
+  text-align: left;
+}
+
+.column-center{
+  float: right;
+  width: 100%;
+  height: 90%;
+  text-align: left;
+}
+</style>
+
+
+Sidebar {.sidebar}
+----------------------------
+
+#### <b>Information</b>
+
+<b>Background:</b>
+I started using Indego Bikeshare in May 2016 when I started working at CHOP.  Since then, I've used it to explore the city in addition as using it as my main form of transportation to/from work.
+
+<b>Data Cleaning:</b>
+Some rough data cleaning included:
+<br>1. Removing all rides where the duration is less than 5 minutes and the start station is the same as the end station.  This accounts for instances where a bike is not functioning properly, and I immediately returned it.<br>
+<br>1. If a ride has different start/stop stations and mileage is 0, I changed the mileage to 0.30.  This accounts for my quick trips where I'm too lazy to walk.<br>
+<br>3. If my duration was ever calculated to be more than 4.5 miles, I fixed that to my average city trip mileage (2.5 miles).  This accounts for times when I returned the bike to the station, but the station may not have checked in my bike until much later.  The only exception to this is when the start station is in Fairmount (20th & Fairmount, 23rd & Fairmount, Art Museum) and the end station is the Museum of Art.  I get my leisurely bike ride around MLK and Kelly drive when the springtime hits.
+
+
+
+Row {.tabset}
+-----------------------------------------------------------------------
+
+### <b>RIDE GEOGRAPHY</b>
+
+
+<div class="column-left">
+#### Map of Start and End Trips
+```{r ride_map}
+labs <- lapply(seq(nrow(all_stations)), function(i) {
+ paste0( 'Station: ', all_stations[i, "station"], '</p>Start Trips: ',
+         all_stations[i, "start"], '<p></p>End Trips: ',
+         all_stations[i, "end"])})
+
+ leaflet(all_stations) %>%
+ setView(lng = -75.173145, lat = 39.953014, zoom = 13.5) %>%
+ addProviderTiles(providers$Stamen.Toner, options = providerTileOptions(opacity = 0.4)) %>% #Stamen.Watercolor, HikeBike
+ addProviderTiles(providers$Stamen.Watercolor, options = providerTileOptions(opacity = 0.5)) %>%
+ addProviderTiles(providers$Stamen.TonerLabels, options = providerTileOptions(opacity = 0.5)) %>%
+ addCircleMarkers(lng = ~lon,
+                  lat = ~lat,
+                  radius = ~relative_end_n,
+                  color = "#ba4e4e",
+                  label = lapply(labs, HTML)) %>%
+ addCircleMarkers(lng = ~lon,
+                  lat = ~lat,
+                  radius = ~relative_start_n,
+                  color = "#26679b",
+                  label = lapply(labs, HTML)) %>%
+ addLegend("bottomright",
+           labels = c("Start Station", "End Station"),
+           color = c("#26679b", "#ba4e4e"),
+           title = 'Station Type')
+```
+</div>
+
+<div class="column-right">
+#### Station Trip Volume by Start/End Location
+```{r table}
+all_stations %>% 
+  dplyr::select("Station" = station, "# Start Rides" = start, "# End Rides" = end) %>% 
+  #arrange(desc(`# Start Rides`)) %>% 
+  DT::datatable(
+    rownames = F,
+    options = list(
+          pageLength = 15,
+          #dom = 'ft',
+          order = list(1, 'desc')
+  ))
+
+```
+</div>
+
+### <b>TRIP VOLUME OVER TIME</b>
+```{r set_time_inputs}
+selectInput("timeselect", label = h6("Display graphs by:"),
+            choices = c("Weeks", "Months"), selected = "Months")
+```
+
+```{r run chart cleaning, echo = F, warning = F}
+emily_data <- reactive({
+
+weather_aggr <- weather %>% 
+  dplyr::mutate(weather_dt = as.Date(DATE, "%m/%d/%Y"),
+    weather_week = lubridate::floor_date(weather_dt, unit = tolower(input$timeselect)),
+                precip_yn = ifelse(PRCP > 0, 1, 0),
+                precip_ge1 = ifelse(PRCP >= 1, 1, 0)) %>% 
+  dplyr::group_by(weather_week) %>% 
+  dplyr::summarise(avg_max_temp = round(mean(TMAX, na.rm = TRUE),2),
+                   avg_min_temp = round(mean(TMIN, na.rm = TRUE),2),
+                   days_precip = sum(precip_yn, na.rm = TRUE),
+                   days_precip_ge1 = sum(precip_ge1, na.rm = TRUE))
+  
+emily_data_time<-emily_data_clean %>% 
+  dplyr::mutate(ride_week = lubridate::floor_date(date, unit = tolower(input$timeselect))) %>% 
+  dplyr::group_by(ride_week) %>% 
+  dplyr::summarise(n=n())
+
+plot<-qicharts2::qic(ride_week, n,  
+               #notes    = notes,
+               data     = emily_data_time,
+               chart = 'c',
+               agg.fun = 'sum',
+               #multiply = 1000,
+               #freeze = 12,
+               #part = 48,
+               #part.labels = c('Baseline', 'Intervention'),
+               title    = paste0('Bike Rides by ', input$timeselect),
+               ylab     = paste0('# Rides per ', input$timeselect),
+               xlab     = 'Date')
+
+plot_data<-plot$data %>% 
+  dplyr::select(date = x , avg_metric = y, centerline = cl, ucl.3 = ucl, lcl.3 = lcl) %>% 
+  dplyr::mutate(date_aggr_dt = date(date),
+                avg_cost_per_ride = round(17/avg_metric,2),
+                centerline = round(centerline,2),
+                ucl.3 = round(ucl.3,2),
+                lcl.3 = round(lcl.3,2)) %>% 
+  dplyr::select(-date) %>% 
+  left_join(weather_aggr, by = c('date_aggr_dt'='weather_week'))
+})
+```
+
+<div class="column-center">
+```{r time graph}
+renderHighchart({
+  
+plot_data <- emily_data()   
+highchart(type = "stock") %>% 
+  hc_yAxis_multiples(
+    list(title = list(text = paste0("# Rides per ",input$timeselect)), opposite = FALSE),
+    list(title = list(text = "Temperature (Degrees F)"), showLastLabel = TRUE,
+         opposite = TRUE)) %>% 
+  hc_add_series(plot_data, type = "line", name = "Upper Control Limit", color="#B3B3B3", 
+                dashStyle="ShortDash", step=TRUE, hcaes(x = date_aggr_dt, y = ucl.3)) %>%
+  hc_add_series(plot_data, 
+                name = "Number of Rides", 
+                hcaes(x = date_aggr_dt, y = avg_metric), 
+                type="line",  
+                marker = list(enabled=TRUE,
+                              symbol="circle",
+                              fillColor = "#94D60A", ##indego green
+                              radius=3,
+                              lineWidth = 2,
+                              lineColor = NULL),
+                color="#94D60A", 
+                dashStyle="Solid") %>%
+  hc_add_series(plot_data, 
+                type = "line", 
+                name = "Mean", 
+                color="#16216A", #indego navy
+                dashStyle="ShortDash", 
+                step = TRUE,
+                hcaes(x = date_aggr_dt, y = centerline)) %>%
+  hc_add_series(plot_data, 
+                type = "line", 
+                name = "Lower Control Limit", 
+                color="#B3B3B3", 
+                dashStyle="ShortDash", 
+                step=TRUE, 
+                hcaes(x = date_aggr_dt, y = lcl.3)) %>% 
+  hc_add_series(plot_data, 
+                name = "Max Temp", 
+                hcaes(x = date_aggr_dt, y = avg_max_temp), 
+                type="line",  
+                marker = list(enabled=TRUE,
+                              symbol="circle",
+                              fillColor = "#f49e42",
+                              radius=2,
+                              lineWidth = 1.5,
+                              lineColor = NULL),
+                color="#f49e42", 
+                dashStyle="Solid",
+                visible=FALSE,
+                yAxis=1) %>% 
+  hc_add_series(plot_data, 
+                name = "Min Temp", 
+                hcaes(x = date_aggr_dt, y = avg_min_temp), 
+                type="line",  
+                marker = list(enabled=TRUE,
+                              symbol="circle",
+                              fillColor = "#3382cc",
+                              radius=2,
+                              lineWidth = 1.5,
+                              lineColor = NULL),
+                color="#3382cc", 
+                dashStyle="Solid",
+                visible=FALSE,
+                yAxis=1) %>% 
+  hc_add_series(plot_data, 
+                name = "Days Precip", 
+                hcaes(x = date_aggr_dt, y = days_precip), 
+                type="line",  
+                marker = list(enabled=TRUE,
+                              symbol="circle",
+                              fillColor = "#944c9b",
+                              radius=2,
+                              lineWidth = 1.5,
+                              lineColor = NULL),
+                color="#944c9b", 
+                dashStyle="Solid",
+                visible=FALSE) %>% 
+  hc_legend(enabled = T)  %>%
+  hc_add_theme(hc_theme_flat()) %>% 
+  hc_navigator(enabled = F) %>%
+  hc_chart(zoomType = "x") %>%
+  hc_tooltip(shared = TRUE, split = FALSE) %>%
+  #hc_title(text = paste0(input$timeselect, " INDEGO BIKE USAGE"), 
+  #         align = "left") %>%
+  hc_xAxis(type = 'datetime') 
+  #hc_yAxis(title = list(text = paste0("# Rides per ",input$timeselect)),
+  #         opposite = FALSE,
+  #         min = 0,
+  #         max = max(plot_data$avg_metric, plot_data$ucl.3, plot_data$avg_max_temp)*1.1) 
+
+})
+
+```
+</div>
+
+### <b>JOURNEY MAP</b>
+
+<div class="column-left">
+#### Map of Destinations: Select a Start Station Below
+```{r set_station_inputs}
+station_names<-sort(unique(emily_station$station_start))
+
+selectInput("stationselect", label = NULL, #h5("Select a Start Station:"),
+            choices = station_names, selected = "20th & Fairmount")
+```
+
+```{r journey cleaning, echo = F, warning = F}
+journey_data <- reactive({
+
+start_coords<- emily_station %>% 
+  ungroup() %>% 
+  filter(station_start == input$stationselect) %>% 
+  dplyr::select(lat = start_lat, lon = start_lon, station = station_start) %>% 
+  dplyr::mutate(sequence = row_number()*2-1)
+
+end_coords<- emily_station %>% 
+  ungroup() %>% 
+  filter(station_start == input$stationselect) %>% 
+  dplyr::select(lat = end_lat, lon = end_lon, station = station_end) %>% 
+  dplyr::mutate(sequence = row_number()*2)                
+
+journey_coords <- start_coords %>% bind_rows(end_coords) %>% arrange(sequence)
+})
+
+dest_table <- reactive({
+
+destinations <- emily_station %>% 
+  ungroup() %>% 
+  filter(station_start == input$stationselect) %>% 
+  dplyr::select(station_end) %>% 
+  group_by(station_end) %>% 
+  summarise(n=n()) %>% 
+  arrange(desc(n))
+})
+```
+
+```{r journey map}
+#journey<-journey_data()
+
+labs2 <- lapply(seq(nrow(all_stations)), function(i) {
+ paste0( 'Station: ', all_stations[i, "station"])})
+
+labs3 <- reactive({
+  
+  labs3a<<- lapply(seq(nrow(journey_data())), function(i) {
+ paste0( 'Station: ', journey_data()[i, "station"])})
+  
+})
+
+renderLeaflet({
+leaflet() %>%
+  setView(lng = -75.173145, lat = 39.953014, zoom = 13.5) %>%
+  addProviderTiles(providers$Stamen.Toner, options = providerTileOptions(opacity = 0.4)) %>% #Stamen.Watercolor, HikeBike
+  addProviderTiles(providers$Stamen.Watercolor, options = providerTileOptions(opacity = 0.5)) %>%
+  addProviderTiles(providers$Stamen.TonerLabels, options = providerTileOptions(opacity = 0.5)) %>%
+  addCircleMarkers(data = all_stations, 
+                   lng = ~lon,
+                   lat = ~lat,
+                   radius = 4,
+                   color = "grey",
+                   label = lapply(labs2, HTML)) %>%
+  addCircleMarkers(data = journey_data(), 
+                   lng = ~lon,
+                   lat = ~lat,
+                   radius = 3.5,
+                   color = "#26679b",
+                   label = lapply(labs3(), HTML)) %>%
+  #addLegend("bottomright",
+  #          labels = c("Start Station", "End Station"),
+  #          color = c("#26679b", "#ba4e4e"),
+  #          title = 'Station Type') %>% 
+  addPolylines(data = journey_data(),
+               lng = ~lon, 
+               lat = ~lat,
+               weight = .7,
+               opacity = .8,
+               color = '#26679b')
+})
+
+```
+</div>
+
+<div class="column-right">
+#### Most Popular Destinations from Selected Start Station
+```{r dest table}
+#`r renderText({paste0('Most Popular Destination from ', input$stationselect)})`
+
+renderDT({
+dest_table() %>% 
+  dplyr::rename("End Station" = station_end, "# Rides" = n) %>% 
+  #arrange(desc(`# Start Rides`)) %>% 
+  DT::datatable(
+    rownames = F,
+    options = list(
+          pageLength = 15,
+          #dom = 'ft',
+          order = list(1, 'desc')
+  ))
+})
+```
+</div>
+
+Row 
+-----------------------------------------------------------------------
+
+### **Number of Rides Taken <br>May 2016 - April 2019** 
+
+```{r num_rides}
+
+# Creating the value we want to display
+num_rides<-nrow(emily_data_clean)
+
+renderValueBox ({
+  valueBox(
+    num_rides,
+    # icon for the valuebox - see options here: https://fontawesome.com/icons?d=gallery&m=free
+    icon ="fa-bicycle", 
+    color = "#16216A") #indego navy;old blue = #5d98f7
+})
+```
+
+### **Number of Miles Biked <br>May 2016 - April 2019** 
+
+```{r num_miles}
+ 
+# Creating the value we want to display
+num_miles<-sum(emily_data_clean$miles_clean)
+
+renderValueBox ({
+  valueBox(
+    #format(num_miles, format = "d"),
+    value = num_miles, #tags$p(num_miles, style = "font-color: 'black';"), #num_miles,
+    # icon for the valuebox - see options here: https://fontawesome.com/icons?d=gallery&m=free
+    icon ="fa-road", 
+    color = "#0085CA") ##indego blue #0085CA
+})
+
+
+#    valueBox(
+#
+#      format(sum(select(subset(ga1,date>=max(date)-as.numeric(input$radio)),goal10Completions)),format="d",#big.mark=","), 
+#
+#             "Transactions", icon = icon("shopping-cart"), color = "blue")
+
+```
+
+### **Overall Cost per Ride <br>May 2016 - April 2019** 
+
+```{r money}
+ 
+# Creating the value we want to display # cost through end of May 2019
+cost<-paste0('$',round((566-9)/num_rides,2))
+
+renderValueBox ({
+  valueBox(
+    cost,
+    # icon for the valuebox - see options here: https://fontawesome.com/icons?d=gallery&m=free
+    icon ="fa-dollar-sign", 
+    color = "#94D60A") #indego green, old green = #78c442
+})
+
+```
